@@ -3,18 +3,19 @@ import argparse
 import pandas as pd
 import torch
 import torch.distributed as dist
+from coati.dataset.dummy_prompt_dataset import DummyPromptDataset
+from coati.dataset.dummy_sft_dataset import DummySupervisedDataset
 from coati.dataset import DataCollatorForSupervisedDataset, PromptDataset, SupervisedDataset
+# FIXME. removed Llama related imports for now
 from coati.models.bloom import BLOOMRM, BLOOMActor, BLOOMCritic
 from coati.models.gpt import GPTRM, GPTActor, GPTCritic
-from coati.models.llama import LlamaActor, LlamaCritic, LlamaRM
 from coati.models.opt import OPTRM, OPTActor, OPTCritic
 from coati.trainer import PPOTrainer
 from coati.trainer.strategies import ColossalAIStrategy, DDPStrategy, NaiveStrategy
-from coati.utils import prepare_llama_tokenizer_and_embedding
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from transformers import AutoTokenizer, BloomTokenizerFast, GPT2Tokenizer, LlamaTokenizer
+from transformers import AutoTokenizer, BloomTokenizerFast, GPT2Tokenizer
 
 from colossalai.nn.optimizer import HybridAdam
 
@@ -83,6 +84,7 @@ def main(args):
             raise ValueError(f'Unsupported actor model "{args.model}"')
 
         if rm_model_name == 'gpt2':
+            # FIXME. was passing use_action_mask before, not sure how that worked
             critic = GPTCritic(pretrained=args.rm_pretrain, lora_rank=args.lora_rank, use_action_mask=True)
         elif rm_model_name == 'bloom':
             critic = BLOOMCritic(pretrained=args.rm_pretrain, lora_rank=args.lora_rank, use_action_mask=True)
@@ -129,7 +131,8 @@ def main(args):
 
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
 
-    prompt_dataset = PromptDataset(tokenizer=tokenizer, data_path=args.prompt_path, max_datasets_size=16384)
+    # FIXME. subbed in dummy dataset to make it easier to run
+    prompt_dataset = DummyPromptDataset(tokenizer=tokenizer, size=16384)
     if dist.is_initialized() and dist.get_world_size() > 1:
         prompt_sampler = DistributedSampler(prompt_dataset, shuffle=True, seed=42, drop_last=True)
     prompt_dataloader = DataLoader(prompt_dataset,
@@ -137,7 +140,8 @@ def main(args):
                                    sampler=prompt_sampler,
                                    batch_size=args.train_batch_size)
 
-    pretrain_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=args.pretrain_dataset, max_datasets_size=16384)
+    # FIXME. subbed in dummy dataset to make it easier to run
+    pretrain_dataset = DummySupervisedDataset(tokenizer=tokenizer, size=16384)
     if dist.is_initialized() and dist.get_world_size() > 1:
         pretrain_sampler = DistributedSampler(pretrain_dataset, shuffle=True, seed=42, drop_last=True)
     pretrain_dataloader = DataLoader(pretrain_dataset,

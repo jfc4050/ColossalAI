@@ -15,6 +15,8 @@ elif TORCH_MAJOR == 1 and TORCH_MINOR == 13:
     META_COMPATIBILITY = True
 elif TORCH_MAJOR == 2:
     META_COMPATIBILITY = True
+else:
+    META_COMPATIBILITY = False
 
 
 def compatibility(is_backward_compatible: bool = False) -> Callable:
