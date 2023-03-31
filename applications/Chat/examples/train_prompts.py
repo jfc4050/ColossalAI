@@ -3,6 +3,7 @@ import argparse
 import pandas as pd
 import torch
 import torch.distributed as dist
+from applications.Chat.coati.trainer.strategies.base import Strategy
 from coati.dataset.dummy_prompt_dataset import DummyPromptDataset
 from coati.dataset.dummy_sft_dataset import DummySupervisedDataset
 from coati.dataset import DataCollatorForSupervisedDataset, PromptDataset, SupervisedDataset
@@ -11,6 +12,7 @@ from coati.models.bloom import BLOOMRM, BLOOMActor, BLOOMCritic
 from coati.models.gpt import GPTRM, GPTActor, GPTCritic
 from coati.models.opt import OPTRM, OPTActor, OPTCritic
 from coati.trainer import PPOTrainer
+from coati.trainer.callbacks.performance_evaluator import PerformanceEvaluator
 from coati.trainer.strategies import ColossalAIStrategy, DDPStrategy, NaiveStrategy
 from torch.optim import Adam
 from torch.utils.data import DataLoader
@@ -18,6 +20,37 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import AutoTokenizer, BloomTokenizerFast, GPT2Tokenizer
 
 from colossalai.nn.optimizer import HybridAdam
+
+
+def get_model_numel(model: torch.nn.Module, strategy: Strategy) -> int:
+    numel = sum(p.numel() for p in model.parameters())
+    if isinstance(strategy, ColossalAIStrategy) and strategy.stage == 3 and strategy.shard_init:
+        numel *= dist.get_world_size()
+    return numel
+
+
+def print_rank_0(*args, **kwargs) -> None:
+    if dist.get_rank() == 0:
+        print(*args, **kwargs)
+
+
+def print_model_numel(model_dict: dict) -> None:
+    B = 1024**3
+    M = 1024**2
+    K = 1024
+    outputs = ''
+    for name, numel in model_dict.items():
+        outputs += f'{name}: '
+        if numel >= B:
+            outputs += f'{numel / B:.2f} B\n'
+        elif numel >= M:
+            outputs += f'{numel / M:.2f} M\n'
+        elif numel >= K:
+            outputs += f'{numel / K:.2f} K\n'
+        else:
+            outputs += f'{numel}\n'
+    print_rank_0(outputs)
+
 
 
 def main(args):
@@ -158,6 +191,30 @@ def main(args):
 
     (actor, actor_optim), (critic, critic_optim) = strategy.prepare((actor, actor_optim), (critic, critic_optim))
 
+    actor_numel = get_model_numel(actor, strategy)
+    critic_numel = get_model_numel(critic, strategy)
+    initial_model_numel = get_model_numel(initial_model, strategy)
+    reward_model_numel = get_model_numel(reward_model, strategy)
+    print_model_numel({
+        'Actor': actor_numel,
+        'Critic': critic_numel,
+        'Initial model': initial_model_numel,
+        'Reward model': reward_model_numel
+    })
+
+    callbacks = []
+    if True:  # TODO. make this command line option
+        perf_callback = PerformanceEvaluator(
+            actor_num_params=actor_numel,
+            critic_num_params=critic_numel,
+            initial_model_num_params=initial_model_numel,
+            reward_model_num_params=reward_model_numel,
+            enable_grad_checkpoint=False,
+            ignore_episodes=1,
+        )
+        callbacks.append(perf_callback)
+
+
     # configure trainer
     trainer = PPOTrainer(
         strategy,
@@ -179,6 +236,7 @@ def main(args):
         top_k=50,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
+        callbacks=callbacks,
     )
 
     trainer.fit(prompt_dataloader=prompt_dataloader,
@@ -186,14 +244,6 @@ def main(args):
                 num_episodes=args.num_episodes,
                 max_timesteps=args.max_timesteps,
                 update_timesteps=args.update_timesteps)
-
-    # save model checkpoint after fitting
-    trainer.save_model(args.save_path, only_rank0=True, tokenizer=tokenizer)
-    # save optimizer checkpoint on all ranks
-    if args.need_optim_ckpt:
-        strategy.save_optimizer(actor_optim,
-                                'actor_optim_checkpoint_prompts_%d.pt' % (torch.cuda.current_device()),
-                                only_rank0=False)
 
 
 if __name__ == '__main__':
